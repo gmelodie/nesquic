@@ -136,7 +136,7 @@ async fn run_server(addr: SocketAddr) {
 }
 
 async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
-    let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap())?;
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
     endpoint.set_default_client_config(configure_client());
 
     // connect to server
