@@ -6,7 +6,7 @@ use std::{
     error::Error,
     io::{stdin, stdout, BufRead, BufReader, Write},
     net::SocketAddr,
-    str::from_utf8,
+    // str::from_utf8,
 };
 
 use clap::{App, Arg, SubCommand};
@@ -55,23 +55,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => unreachable!(), // If no subcommand was used it'll match the empty tuple
     }
-    tracing_subscriber::fmt::init();
     Ok(())
 }
 
-async fn recv_until(recv: &mut quinn::RecvStream, delim: u8) -> Vec<u8> {
-    //TODO: implement stopping in delim logic
+async fn recv_until(
+    recv: &mut quinn::RecvStream,
+    delim: u8,
+) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
     let mut buffer = vec![0; 1024];
     loop {
-        let bytes_read = recv.read(&mut buffer).await.unwrap();
-        if bytes_read == Some(0) || bytes_read == None {
-            continue;
+        // let bytes_read = recv.read(&mut buffer).await.unwrap();
+
+        match recv.read(&mut buffer).await {
+            Ok(None) => {
+                info!("stream was closed by the peer.");
+                return Ok(None);
+            }
+            Ok(Some(_bytes_read)) => {
+                // Successfully read _bytes_read bytes
+                if buffer.iter().find(|&&x| x == delim).is_some() {
+                    // if found delim
+                    return Ok(Some(buffer));
+                }
+                // Handle data in buffer
+            }
+            Err(e) => {
+                // Handle error (e.g., connection error)
+                return Err(Box::new(e));
+            }
         }
-        debug!("read '{}'", from_utf8(&buffer).unwrap());
-        if buffer.iter().find(|&&x| x == delim).is_some() {
-            // if found delim
-            return buffer;
-        }
+        // if bytes_read == Some(0) || bytes_read == None {
+        //     continue;
+        // }
+        // debug!("read '{}'", from_utf8(&buffer).unwrap());
+        // if buffer.iter().find(|&&x| x == delim).is_some() {
+        //     // if found delim
+        //     return buffer;
+        // }
     }
 }
 
@@ -106,14 +126,13 @@ async fn run_server(addr: SocketAddr) {
     debug!("[server] connection accepted");
     loop {
         // recv one line from client
-        let msg = recv_until(&mut recv, b'\n').await;
-
-        // TODO: if received EOF/error, break
-
-        // print message to screen
-        let _ = stdout().write_all(&msg);
+        // let msg = recv_until(&mut recv, b'\n').await;
+        let _ = match recv_until(&mut recv, b'\n').await {
+            Ok(Some(msg)) => stdout().write_all(&msg),
+            Ok(None) => break,
+            Err(e) => panic!("{}", e),
+        };
     }
-    // info!("[server] connection closed");
 }
 
 async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
@@ -154,8 +173,6 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
     send.finish().await.unwrap();
 
     drop(conn);
-    // Make sure the server has a chance to clean up
-    endpoint.wait_idle().await;
 
     Ok(())
 }
