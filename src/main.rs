@@ -4,7 +4,7 @@
 
 use std::{
     error::Error,
-    io::{stdin, BufRead, BufReader},
+    io::{stdin, stdout, BufRead, BufReader, Write},
     net::SocketAddr,
     str::from_utf8,
 };
@@ -12,7 +12,7 @@ use std::{
 use quinn::{Endpoint, RecvStream, SendStream};
 
 mod util;
-use tracing::{debug, info};
+use tracing::debug;
 use tracing_subscriber;
 use util::{configure_client, make_server_endpoint};
 
@@ -26,11 +26,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn recv_until(mut recv: quinn::RecvStream, _delim: u8) -> Vec<u8> {
+async fn recv_until(mut recv: quinn::RecvStream, delim: u8) -> Vec<u8> {
     //TODO: implement stopping in delim logic
-    // let mut buffer = vec![];
-    // let _ = recv.read(&mut buffer).await.unwrap();
-    return recv.read_to_end(64 * 1024).await.unwrap();
+    let mut buffer = vec![0; 1024];
+    loop {
+        let bytes_read = recv.read(&mut buffer).await.unwrap();
+        if bytes_read == Some(0) || bytes_read == None {
+            continue;
+        }
+        debug!("read '{}'", from_utf8(&buffer).unwrap());
+        if buffer.iter().find(|&&x| x == delim).is_some() {
+            // if found delim
+            return buffer;
+        }
+    }
 }
 
 async fn accept_conn(endpoint: Endpoint) -> (SendStream, RecvStream) {
@@ -63,7 +72,7 @@ async fn run_server(addr: SocketAddr) {
     // recv one line from client
     let msg = recv_until(recv, b'\n').await;
     // print message to screen
-    info!("{}", from_utf8(&msg).unwrap());
+    let _ = stdout().write_all(&msg);
 }
 
 async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
@@ -83,7 +92,7 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
     let mut buffer = vec![];
     let _ = reader.read_until(b'\n', &mut buffer);
 
-    // send read data
+    // send data that was read
     let (mut send, mut _recv) = conn.open_bi().await.unwrap();
     send.write_all(&buffer).await.unwrap();
     send.finish().await.unwrap();
