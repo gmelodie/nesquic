@@ -1,5 +1,5 @@
-use quinn::{ClientConfig, Endpoint, ServerConfig};
-use std::{error::Error, net::SocketAddr, sync::Arc};
+use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
 
 pub fn make_server_endpoint(bind_addr: SocketAddr) -> Result<(Endpoint, Vec<u8>), Box<dyn Error>> {
     let (server_config, server_cert) = configure_server()?;
@@ -16,6 +16,8 @@ pub fn configure_server() -> Result<(ServerConfig, Vec<u8>), Box<dyn Error>> {
     let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key)?;
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
+    // Set the idle timeout to higher values
+    transport_config.max_idle_timeout(Some(Duration::from_secs(5 * 60).try_into().unwrap()));
 
     Ok((server_config, cert_der))
 }
@@ -49,6 +51,11 @@ pub fn configure_client() -> ClientConfig {
         .with_safe_defaults()
         .with_custom_certificate_verifier(SkipServerVerification::new())
         .with_no_client_auth();
+    // Set timeout to 5min
+    let mut transport_config = TransportConfig::default();
+    transport_config.max_idle_timeout(Some(Duration::from_secs(5 * 60).try_into().unwrap()));
+    let mut client_config = ClientConfig::new(Arc::new(crypto));
+    client_config.transport_config(transport_config.into());
 
-    ClientConfig::new(Arc::new(crypto))
+    client_config
 }
