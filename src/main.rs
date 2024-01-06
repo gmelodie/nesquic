@@ -9,6 +9,8 @@ use std::{
     str::from_utf8,
 };
 
+use clap::{App, Arg, SubCommand};
+
 use quinn::{Endpoint, RecvStream, SendStream};
 
 mod util;
@@ -19,10 +21,41 @@ use util::{configure_client, make_server_endpoint};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
-    // server and client are running on the same thread asynchronously
-    let addr = "127.0.0.1:5000".parse().unwrap();
-    tokio::spawn(run_server(addr));
-    run_client(addr).await?;
+    let matches = App::new("Nesquic")
+        .subcommand(
+            SubCommand::with_name("client")
+                .about("Runs the client (sender)")
+                .arg(
+                    Arg::with_name("server_address")
+                        .help("The server address to connect to")
+                        .default_value("127.0.0.1:5003")
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("server")
+                .about("Runs the server (receiver)")
+                .arg(
+                    Arg::with_name("bind_address")
+                        .help("The address server will listen on")
+                        .default_value("127.0.0.1:5003")
+                        .index(1),
+                ),
+        )
+        .get_matches();
+
+    match matches.subcommand() {
+        Some(("client", client_matches)) => {
+            let server_address = client_matches.value_of("server_address").unwrap();
+            let _ = run_client(server_address.parse().unwrap()).await;
+        }
+        Some(("server", server_matches)) => {
+            let bind_address = server_matches.value_of("bind_address").unwrap();
+            let _ = run_server(bind_address.parse().unwrap()).await;
+        }
+        _ => unreachable!(), // If no subcommand was used it'll match the empty tuple
+    }
+    tracing_subscriber::fmt::init();
     Ok(())
 }
 
@@ -68,7 +101,9 @@ async fn run_server(addr: SocketAddr) {
     // instanciate server
     let (endpoint, _server_cert) = make_server_endpoint(addr).unwrap();
     // accept connection from client
+    debug!("[server] running, waiting on connections...");
     let (mut _send, mut recv) = accept_conn(endpoint).await;
+    debug!("[server] connection accepted");
     loop {
         // recv one line from client
         let msg = recv_until(&mut recv, b'\n').await;
@@ -78,7 +113,7 @@ async fn run_server(addr: SocketAddr) {
         // print message to screen
         let _ = stdout().write_all(&msg);
     }
-    info!("[server] connection closed");
+    // info!("[server] connection closed");
 }
 
 async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
@@ -87,10 +122,10 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
 
     // connect to server
     let conn = endpoint
-        .connect(server_addr, "localhost")
+        .connect(server_addr, "127.0.0.1")
         .unwrap()
         .await
-        .unwrap();
+        .expect("could not connect to server");
     info!("[client] connected: addr={}", conn.remote_address());
 
     // open stream
