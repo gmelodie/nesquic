@@ -12,7 +12,7 @@ use std::{
 use quinn::{Endpoint, RecvStream, SendStream};
 
 mod util;
-use tracing::debug;
+use tracing::{debug, info};
 use tracing_subscriber;
 use util::{configure_client, make_server_endpoint};
 
@@ -72,9 +72,13 @@ async fn run_server(addr: SocketAddr) {
     loop {
         // recv one line from client
         let msg = recv_until(&mut recv, b'\n').await;
+
+        // TODO: if received EOF/error, break
+
         // print message to screen
         let _ = stdout().write_all(&msg);
     }
+    info!("[server] connection closed");
 }
 
 async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
@@ -87,7 +91,7 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
         .unwrap()
         .await
         .unwrap();
-    println!("[client] connected: addr={}", conn.remote_address());
+    info!("[client] connected: addr={}", conn.remote_address());
 
     // open stream
     let (mut send, mut _recv) = conn.open_bi().await.unwrap();
@@ -96,14 +100,22 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
     let mut reader = BufReader::new(stdin());
     let mut buffer = vec![];
 
+    // read input from stdin and send it to server until EOF is reached
     loop {
-        let _ = reader.read_until(b'\n', &mut buffer);
+        buffer.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut buffer)
+            .expect("failed to read from stdin");
+        if bytes_read == 0 {
+            // EOF reached
+            break;
+        }
         send.write_all(&buffer).await.unwrap();
         buffer.clear();
     }
-    // TODO: read input from stdin
 
-    // send data that was read
+    // close connection
+    info!("[client] closing connection");
     send.finish().await.unwrap();
 
     drop(conn);
