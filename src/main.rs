@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn recv_until(mut recv: quinn::RecvStream, delim: u8) -> Vec<u8> {
+async fn recv_until(recv: &mut quinn::RecvStream, delim: u8) -> Vec<u8> {
     //TODO: implement stopping in delim logic
     let mut buffer = vec![0; 1024];
     loop {
@@ -68,11 +68,13 @@ async fn run_server(addr: SocketAddr) {
     // instanciate server
     let (endpoint, _server_cert) = make_server_endpoint(addr).unwrap();
     // accept connection from client
-    let (mut _send, recv) = accept_conn(endpoint).await;
-    // recv one line from client
-    let msg = recv_until(recv, b'\n').await;
-    // print message to screen
-    let _ = stdout().write_all(&msg);
+    let (mut _send, mut recv) = accept_conn(endpoint).await;
+    loop {
+        // recv one line from client
+        let msg = recv_until(&mut recv, b'\n').await;
+        // print message to screen
+        let _ = stdout().write_all(&msg);
+    }
 }
 
 async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
@@ -87,14 +89,21 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
         .unwrap();
     println!("[client] connected: addr={}", conn.remote_address());
 
-    // TODO: read input from stdin
+    // open stream
+    let (mut send, mut _recv) = conn.open_bi().await.unwrap();
+
+    // instanciate stdin reader
     let mut reader = BufReader::new(stdin());
     let mut buffer = vec![];
-    let _ = reader.read_until(b'\n', &mut buffer);
+
+    loop {
+        let _ = reader.read_until(b'\n', &mut buffer);
+        send.write_all(&buffer).await.unwrap();
+        buffer.clear();
+    }
+    // TODO: read input from stdin
 
     // send data that was read
-    let (mut send, mut _recv) = conn.open_bi().await.unwrap();
-    send.write_all(&buffer).await.unwrap();
     send.finish().await.unwrap();
 
     drop(conn);
