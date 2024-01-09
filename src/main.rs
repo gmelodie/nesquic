@@ -4,23 +4,29 @@
 
 use std::{
     error::Error,
-    io::{stdin, stdout, BufRead, BufReader, Write},
+    io::{stderr, stdin, stdout, BufRead, Write},
     net::SocketAddr,
     // str::from_utf8,
 };
 
 use clap::{App, Arg, SubCommand};
 
+use bytes::Bytes;
 use quinn::{Endpoint, RecvStream, SendStream};
 
 mod util;
 use tracing::{debug, info};
 use tracing_subscriber;
+use tracing_subscriber::EnvFilter;
 use util::{configure_client, make_server_endpoint};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt::init();
+    // TODO: this is not outputting to stdout
+    tracing_subscriber::fmt()
+        .with_writer(stderr)
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     let matches = App::new("Nesquic")
         .subcommand(
             SubCommand::with_name("client")
@@ -60,38 +66,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn recv_until(
     recv: &mut quinn::RecvStream,
-    delim: u8,
-) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
-    let mut buffer = vec![0; 1024];
+    _delim: u8,
+) -> Result<Option<Bytes>, Box<dyn Error>> {
+    // let mut buffer = vec![0; 64 * 1024];
+    // let mut total_read = 0;
+    let in_order = true;
     loop {
-        // let bytes_read = recv.read(&mut buffer).await.unwrap();
-
-        match recv.read(&mut buffer).await {
+        match recv.read_chunk(1024 * 1024, in_order).await {
             Ok(None) => {
                 info!("stream was closed by the peer.");
                 return Ok(None);
             }
-            Ok(Some(_bytes_read)) => {
+            Ok(Some(chunk)) => {
+                return Ok(Some(chunk.bytes));
                 // Successfully read _bytes_read bytes
-                if buffer.iter().find(|&&x| x == delim).is_some() {
-                    // if found delim
-                    return Ok(Some(buffer));
-                }
-                // Handle data in buffer
+                // if buffer.iter().find(|&&x| x == delim).is_some() {
+                //     // if found delim
+                //     return Ok(Some(buffer));
+                // }
+                // total_read += bytes_read;
+                // debug!(
+                //     "received {} bytes; total_read: {} bytes",
+                //     bytes_read, total_read
+                // );
+                // if total_read >= 64 * 1024 {
+                //     // TODO: this makes it lose the final data, fix it
+                //     return Ok(Some(buffer));
+                // }
             }
             Err(e) => {
                 // Handle error (e.g., connection error)
                 return Err(Box::new(e));
             }
         }
-        // if bytes_read == Some(0) || bytes_read == None {
-        //     continue;
-        // }
-        // debug!("read '{}'", from_utf8(&buffer).unwrap());
-        // if buffer.iter().find(|&&x| x == delim).is_some() {
-        //     // if found delim
-        //     return buffer;
-        // }
     }
 }
 
@@ -151,21 +158,22 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
     let (mut send, mut _recv) = conn.open_bi().await.unwrap();
 
     // instanciate stdin reader
-    let mut reader = BufReader::new(stdin());
-    let mut buffer = vec![];
+    let stdin = stdin();
+    let mut stdin = stdin.lock();
+    let mut buffer = vec![0; 64 * 1024];
 
     // read input from stdin and send it to server until EOF is reached
     loop {
         buffer.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut buffer)
-            .expect("failed to read from stdin");
-        if bytes_read == 0 {
+        let buffer = stdin.fill_buf().expect("failed to read from stdin");
+        if buffer.len() == 0 {
             // EOF reached
             break;
         }
         send.write_all(&buffer).await.unwrap();
-        buffer.clear();
+        let length = buffer.len();
+        debug!("sent {} bytes", length);
+        stdin.consume(length);
     }
 
     // close connection
