@@ -83,6 +83,59 @@ async fn accept_conn(endpoint: &Endpoint) -> (SendStream, RecvStream) {
     stream
 }
 
+async fn recv_data(mut recv: RecvStream) -> Result<(), ()> {
+    // TODO: use tokio's async io
+    let in_order = true;
+    loop {
+        match recv.read_chunk(1024 * 1024, in_order).await {
+            //TODO: handle ctrl+c as connection closed (aka make ctrl+c send EOF
+            Ok(None) => {
+                info!("stream was closed by the peer.");
+                return Err(());
+            }
+            Ok(Some(chunk)) => {
+                debug!("received {} bytes", chunk.bytes.len());
+                // let stdout = stdout();
+                // let mut stdout = stdout.lock();
+                let _ = stdout().write_all(&chunk.bytes);
+                // continue reading
+            }
+            Err(e) => {
+                // Handle error (e.g., connection error)
+                error!("unexpected error, shutting down {}", e);
+                return Err(());
+            }
+        }
+    }
+}
+
+async fn send_data(mut send: SendStream) -> Result<(), ()> {
+    // TODO: use tokio's async io
+    // instanciate stdin reader
+    // let stdin = stdin();
+    // let mut stdin = stdin.lock();
+    let mut buffer = vec![0; 64 * 1024];
+
+    // read input from stdin and send it to server until EOF is reached
+    loop {
+        buffer.clear();
+        let buffer = stdin().fill_buf().expect("failed to read from stdin");
+        if buffer.len() == 0 {
+            // EOF reached
+            break;
+        }
+        send.write_all(&buffer).await.unwrap();
+        let length = buffer.len();
+        debug!("sent {} bytes", length);
+        stdin.consume(length);
+    }
+
+    // close connection
+    info!("[client] closing connection");
+    send.finish().await.unwrap();
+    Err(()) // TODO: this should be an OK, but an OK doesnt stop the other recv
+}
+
 /// Runs a QUIC server bound to given addr.
 async fn run_server(addr: SocketAddr) {
     // instanciate server
@@ -91,26 +144,10 @@ async fn run_server(addr: SocketAddr) {
     debug!("[server] running, waiting on connections...");
 
     loop {
-        let (mut _send, mut recv) = accept_conn(&endpoint).await;
+        let (send, recv) = accept_conn(&endpoint).await;
         debug!("[server] connection accepted");
-        let in_order = true;
-        loop {
-            match recv.read_chunk(1024 * 1024, in_order).await {
-                //TODO: handle ctrl+c as connection closed (aka make ctrl+c send EOF
-                Ok(None) => {
-                    info!("stream was closed by the peer.");
-                    break;
-                }
-                Ok(Some(chunk)) => {
-                    let _ = stdout().write_all(&chunk.bytes);
-                }
-                Err(e) => {
-                    // Handle error (e.g., connection error)
-                    error!("Unexpected error, shutting down {}", e);
-                    return;
-                }
-            }
-        }
+        let _ = tokio::try_join!(recv_data(recv), send_data(send));
+        break; // TODO: remove this for multiple connections (maybe a flag?)
     }
 }
 
@@ -127,32 +164,8 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
     info!("[client] connected: addr={}", conn.remote_address());
 
     // open stream
-    let (mut send, mut _recv) = conn.open_bi().await.unwrap();
-
-    // instanciate stdin reader
-    let stdin = stdin();
-    let mut stdin = stdin.lock();
-    let mut buffer = vec![0; 64 * 1024];
-
-    // read input from stdin and send it to server until EOF is reached
-    loop {
-        buffer.clear();
-        let buffer = stdin.fill_buf().expect("failed to read from stdin");
-        if buffer.len() == 0 {
-            // EOF reached
-            break;
-        }
-        send.write_all(&buffer).await.unwrap();
-        let length = buffer.len();
-        debug!("sent {} bytes", length);
-        stdin.consume(length);
-    }
-
-    // close connection
-    info!("[client] closing connection");
-    send.finish().await.unwrap();
-
-    drop(conn);
+    let (send, recv) = conn.open_bi().await.unwrap();
+    let _ = tokio::try_join!(send_data(send), recv_data(recv));
 
     Ok(())
 }
