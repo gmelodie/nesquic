@@ -11,18 +11,16 @@ use std::{
 
 use clap::{App, Arg, SubCommand};
 
-use bytes::Bytes;
 use quinn::{Endpoint, RecvStream, SendStream};
 
 mod util;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_subscriber;
 use tracing_subscriber::EnvFilter;
 use util::{configure_client, make_server_endpoint};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // TODO: this is not outputting to stdout
     tracing_subscriber::fmt()
         .with_writer(stderr)
         .with_env_filter(EnvFilter::from_default_env())
@@ -64,45 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn recv_until(
-    recv: &mut quinn::RecvStream,
-    _delim: u8,
-) -> Result<Option<Bytes>, Box<dyn Error>> {
-    // let mut buffer = vec![0; 64 * 1024];
-    // let mut total_read = 0;
-    let in_order = true;
-    loop {
-        match recv.read_chunk(1024 * 1024, in_order).await {
-            Ok(None) => {
-                info!("stream was closed by the peer.");
-                return Ok(None);
-            }
-            Ok(Some(chunk)) => {
-                return Ok(Some(chunk.bytes));
-                // Successfully read _bytes_read bytes
-                // if buffer.iter().find(|&&x| x == delim).is_some() {
-                //     // if found delim
-                //     return Ok(Some(buffer));
-                // }
-                // total_read += bytes_read;
-                // debug!(
-                //     "received {} bytes; total_read: {} bytes",
-                //     bytes_read, total_read
-                // );
-                // if total_read >= 64 * 1024 {
-                //     // TODO: this makes it lose the final data, fix it
-                //     return Ok(Some(buffer));
-                // }
-            }
-            Err(e) => {
-                // Handle error (e.g., connection error)
-                return Err(Box::new(e));
-            }
-        }
-    }
-}
-
-async fn accept_conn(endpoint: Endpoint) -> (SendStream, RecvStream) {
+async fn accept_conn(endpoint: &Endpoint) -> (SendStream, RecvStream) {
     // accept a single connection
     let incoming_conn = endpoint.accept().await.unwrap();
     let conn = incoming_conn.await.unwrap();
@@ -123,22 +83,34 @@ async fn accept_conn(endpoint: Endpoint) -> (SendStream, RecvStream) {
     stream
 }
 
-/// Runs a QUIC server bound to given address.
+/// Runs a QUIC server bound to given addr.
 async fn run_server(addr: SocketAddr) {
     // instanciate server
     let (endpoint, _server_cert) = make_server_endpoint(addr).unwrap();
     // accept connection from client
     debug!("[server] running, waiting on connections...");
-    let (mut _send, mut recv) = accept_conn(endpoint).await;
-    debug!("[server] connection accepted");
+
     loop {
-        // recv one line from client
-        // let msg = recv_until(&mut recv, b'\n').await;
-        let _ = match recv_until(&mut recv, b'\n').await {
-            Ok(Some(msg)) => stdout().write_all(&msg),
-            Ok(None) => break,
-            Err(e) => panic!("{}", e),
-        };
+        let (mut _send, mut recv) = accept_conn(&endpoint).await;
+        debug!("[server] connection accepted");
+        let in_order = true;
+        loop {
+            match recv.read_chunk(1024 * 1024, in_order).await {
+                //TODO: handle ctrl+c as connection closed (aka make ctrl+c send EOF
+                Ok(None) => {
+                    info!("stream was closed by the peer.");
+                    break;
+                }
+                Ok(Some(chunk)) => {
+                    let _ = stdout().write_all(&chunk.bytes);
+                }
+                Err(e) => {
+                    // Handle error (e.g., connection error)
+                    error!("Unexpected error, shutting down {}", e);
+                    return;
+                }
+            }
+        }
     }
 }
 
