@@ -9,106 +9,73 @@ use std::{
     // str::from_utf8,
 };
 
-use clap::{App, Arg, SubCommand};
+use clap::Parser;
 
-use bytes::Bytes;
 use quinn::{Endpoint, RecvStream, SendStream};
 
 mod util;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_subscriber;
 use tracing_subscriber::EnvFilter;
 use util::{configure_client, make_server_endpoint};
 
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    #[clap(short = 'l', action)]
+    listen: Option<bool>,
+
+    #[clap(last = true, value_parser)]
+    addr: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // TODO: this is not outputting to stdout
     tracing_subscriber::fmt()
         .with_writer(stderr)
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let matches = App::new("Nesquic")
-        .subcommand(
-            SubCommand::with_name("client")
-                .about("Runs the client (sender)")
-                .arg(
-                    Arg::with_name("server_address")
-                        .help("The server address to connect to")
-                        .default_value("127.0.0.1:5003")
-                        .index(1),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("server")
-                .about("Runs the server (receiver)")
-                .arg(
-                    Arg::with_name("bind_address")
-                        .help("The address server will listen on")
-                        .default_value("127.0.0.1:5003")
-                        .index(1),
-                ),
-        )
-        .get_matches();
 
-    match matches.subcommand() {
-        Some(("client", client_matches)) => {
-            let server_address = client_matches.value_of("server_address").unwrap();
-            let _ = run_client(server_address.parse().unwrap()).await;
+    let args = Cli::parse();
+
+    let mut ip_addr = "0.0.0.0";
+    let mut port = "0";
+    match (args.listen, args.addr) {
+        (true, Some(addr)) => {
+            if addr.len() == 2 {
+                // 1. -l ip port
+                ip_addr = addr[0];
+                port = addr[1];
+            } else if addr.len() == 1 {
+                // 2. -l port
+                port = addr[0];
+            } else {
+                return io::Error::new(io::ErrorKind::Other, "usage: [-l] IP PORT").into());
+            }
+            let bind_addr = format!("{}:{}", ip_addr, port);
+            let _ = run_server(bind_addr).await;
+
         }
-        Some(("server", server_matches)) => {
-            let bind_address = server_matches.value_of("bind_address").unwrap();
-            let _ = run_server(bind_address.parse().unwrap()).await;
+        (false, Some(addr)) => {
+            if addr.len() != 2 {
+                return io::Error::new(io::ErrorKind::Other, "usage: [-l] IP PORT").into());
+            }
+            // 3. ip port
+            let server_addr = format!("{}:{}", addr[0], addr[1]);
+            let _ = run_client(server_addr).await;
         }
-        _ => unreachable!(), // If no subcommand was used it'll match the empty tuple
+        _ => return io::Error::new(io::ErrorKind::Other, "usage: [-l] IP PORT").into());
     }
     Ok(())
 }
 
-async fn recv_until(
-    recv: &mut quinn::RecvStream,
-    _delim: u8,
-) -> Result<Option<Bytes>, Box<dyn Error>> {
-    // let mut buffer = vec![0; 64 * 1024];
-    // let mut total_read = 0;
-    let in_order = true;
-    loop {
-        match recv.read_chunk(1024 * 1024, in_order).await {
-            Ok(None) => {
-                info!("stream was closed by the peer.");
-                return Ok(None);
-            }
-            Ok(Some(chunk)) => {
-                return Ok(Some(chunk.bytes));
-                // Successfully read _bytes_read bytes
-                // if buffer.iter().find(|&&x| x == delim).is_some() {
-                //     // if found delim
-                //     return Ok(Some(buffer));
-                // }
-                // total_read += bytes_read;
-                // debug!(
-                //     "received {} bytes; total_read: {} bytes",
-                //     bytes_read, total_read
-                // );
-                // if total_read >= 64 * 1024 {
-                //     // TODO: this makes it lose the final data, fix it
-                //     return Ok(Some(buffer));
-                // }
-            }
-            Err(e) => {
-                // Handle error (e.g., connection error)
-                return Err(Box::new(e));
-            }
-        }
-    }
-}
-
-async fn accept_conn(endpoint: Endpoint) -> (SendStream, RecvStream) {
+async fn accept_conn(endpoint: &Endpoint) -> (SendStream, RecvStream) {
     // accept a single connection
     let incoming_conn = endpoint.accept().await.unwrap();
     let conn = incoming_conn.await.unwrap();
     debug!(
         "[server] connection accepted: addr={}",
-        conn.remote_address()
+        conn.remote_addr()
     );
     let stream = match conn.accept_bi().await {
         Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
@@ -123,22 +90,35 @@ async fn accept_conn(endpoint: Endpoint) -> (SendStream, RecvStream) {
     stream
 }
 
-/// Runs a QUIC server bound to given address.
+/// Runs a QUIC server bound to given addr.
 async fn run_server(addr: SocketAddr) {
     // instanciate server
     let (endpoint, _server_cert) = make_server_endpoint(addr).unwrap();
     // accept connection from client
     debug!("[server] running, waiting on connections...");
-    let (mut _send, mut recv) = accept_conn(endpoint).await;
-    debug!("[server] connection accepted");
+
     loop {
-        // recv one line from client
-        // let msg = recv_until(&mut recv, b'\n').await;
-        let _ = match recv_until(&mut recv, b'\n').await {
-            Ok(Some(msg)) => stdout().write_all(&msg),
-            Ok(None) => break,
-            Err(e) => panic!("{}", e),
-        };
+        let (mut _send, mut recv) = accept_conn(&endpoint).await;
+        debug!("[server] connection accepted");
+        let in_order = true;
+        loop {
+            match recv.read_chunk(1024 * 1024, in_order).await {
+                //TODO: handle ctrl+c as connection closed (aka make ctrl+c send EOF
+                Ok(None) => {
+                    info!("stream was closed by the peer.");
+                    break;
+                }
+                Ok(Some(chunk)) => {
+                    // return Ok(Some(chunk.bytes));
+                    let _ = stdout().write_all(&chunk.bytes);
+                }
+                Err(e) => {
+                    // Handle error (e.g., connection error)
+                    error!("Unexpected error, shutting down {}", e);
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -152,7 +132,7 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
         .unwrap()
         .await
         .expect("could not connect to server");
-    info!("[client] connected: addr={}", conn.remote_address());
+    info!("[client] connected: addr={}", conn.remote_addr());
 
     // open stream
     let (mut send, mut _recv) = conn.open_bi().await.unwrap();
