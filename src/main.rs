@@ -6,7 +6,6 @@ use std::{
     error::Error,
     io::{stderr, stdin, stdout, BufRead, Write},
     net::SocketAddr,
-    // str::from_utf8,
 };
 
 use clap::{App, Arg, SubCommand};
@@ -66,10 +65,6 @@ async fn accept_conn(endpoint: &Endpoint) -> (SendStream, RecvStream) {
     // accept a single connection
     let incoming_conn = endpoint.accept().await.unwrap();
     let conn = incoming_conn.await.unwrap();
-    debug!(
-        "[server] connection accepted: addr={}",
-        conn.remote_address()
-    );
     let stream = match conn.accept_bi().await {
         Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
             panic!("connection closed");
@@ -86,6 +81,7 @@ async fn accept_conn(endpoint: &Endpoint) -> (SendStream, RecvStream) {
 async fn recv_data(mut recv: RecvStream) -> Result<(), ()> {
     // TODO: use tokio's async io
     let in_order = true;
+    let mut stdout = stdout();
     loop {
         match recv.read_chunk(1024 * 1024, in_order).await {
             //TODO: handle ctrl+c as connection closed (aka make ctrl+c send EOF
@@ -95,9 +91,7 @@ async fn recv_data(mut recv: RecvStream) -> Result<(), ()> {
             }
             Ok(Some(chunk)) => {
                 debug!("received {} bytes", chunk.bytes.len());
-                // let stdout = stdout();
-                // let mut stdout = stdout.lock();
-                let _ = stdout().write_all(&chunk.bytes);
+                let _ = stdout.write_all(&chunk.bytes);
                 // continue reading
             }
             Err(e) => {
@@ -109,44 +103,50 @@ async fn recv_data(mut recv: RecvStream) -> Result<(), ()> {
     }
 }
 
+fn get_input() -> Vec<u8> {
+    let stdin = stdin();
+    let mut stdin = stdin.lock();
+    let buffer = stdin
+        .fill_buf()
+        .expect("failed to read from stdin")
+        .to_vec();
+    let length = buffer.len();
+    stdin.consume(length);
+    buffer
+}
+
 async fn send_data(mut send: SendStream) -> Result<(), ()> {
-    // TODO: use tokio's async io
-    // instanciate stdin reader
-    // let stdin = stdin();
-    // let mut stdin = stdin.lock();
     let mut buffer = vec![0; 64 * 1024];
 
     // read input from stdin and send it to server until EOF is reached
     loop {
         buffer.clear();
-        let buffer = stdin().fill_buf().expect("failed to read from stdin");
+        buffer = get_input();
         if buffer.len() == 0 {
             // EOF reached
             break;
         }
         send.write_all(&buffer).await.unwrap();
-        let length = buffer.len();
-        debug!("sent {} bytes", length);
-        stdin.consume(length);
+        debug!("sent {} bytes", buffer.len());
     }
 
     // close connection
     info!("[client] closing connection");
     send.finish().await.unwrap();
-    Err(()) // TODO: this should be an OK, but an OK doesnt stop the other recv
+    Ok(())
 }
 
 /// Runs a QUIC server bound to given addr.
 async fn run_server(addr: SocketAddr) {
-    // instanciate server
     let (endpoint, _server_cert) = make_server_endpoint(addr).unwrap();
-    // accept connection from client
     debug!("[server] running, waiting on connections...");
 
+    // accept connection from client
     loop {
         let (send, recv) = accept_conn(&endpoint).await;
-        debug!("[server] connection accepted");
-        let _ = tokio::try_join!(recv_data(recv), send_data(send));
+        info!("[server] connection accepted");
+        let _ = tokio::spawn(recv_data(recv));
+        let _ = send_data(send).await;
         break; // TODO: remove this for multiple connections (maybe a flag?)
     }
 }
@@ -165,7 +165,8 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
 
     // open stream
     let (send, recv) = conn.open_bi().await.unwrap();
-    let _ = tokio::try_join!(send_data(send), recv_data(recv));
+    let _ = tokio::spawn(recv_data(recv));
+    let _ = send_data(send).await;
 
     Ok(())
 }
