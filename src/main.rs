@@ -8,7 +8,7 @@ use std::{
     net::SocketAddr,
 };
 
-use clap::{App, Arg, SubCommand};
+use clap::Parser;
 
 use quinn::{Endpoint, RecvStream, SendStream};
 
@@ -18,45 +18,68 @@ use tracing_subscriber;
 use tracing_subscriber::EnvFilter;
 use util::{configure_client, make_server_endpoint};
 
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    ///Activate listen mode
+    #[clap(short = 'l', long = "listen", action = clap::ArgAction::SetTrue)]
+    listen: bool,
+
+    ///IP and Port
+    #[clap(value_parser)]
+    addr: Vec<String>,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), ()> {
     tracing_subscriber::fmt()
         .with_writer(stderr)
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let matches = App::new("Nesquic")
-        .subcommand(
-            SubCommand::with_name("client")
-                .about("Runs the client (sender)")
-                .arg(
-                    Arg::with_name("server_address")
-                        .help("The server address to connect to")
-                        .default_value("127.0.0.1:5003")
-                        .index(1),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("server")
-                .about("Runs the server (receiver)")
-                .arg(
-                    Arg::with_name("bind_address")
-                        .help("The address server will listen on")
-                        .default_value("127.0.0.1:5003")
-                        .index(1),
-                ),
-        )
-        .get_matches();
 
-    match matches.subcommand() {
-        Some(("client", client_matches)) => {
-            let server_address = client_matches.value_of("server_address").unwrap();
-            let _ = run_client(server_address.parse().unwrap()).await;
+    let args = Cli::parse();
+
+    // handle ip and port args
+    let (ip, port) = match args.addr.len() {
+        1 => (None, Some(&args.addr[0])),
+        2 => (Some(&args.addr[0]), Some(&args.addr[1])),
+        _ => {
+            println!("usage: [-l] IP PORT");
+            return Ok(());
         }
-        Some(("server", server_matches)) => {
-            let bind_address = server_matches.value_of("bind_address").unwrap();
-            let _ = run_server(bind_address.parse().unwrap()).await;
+    };
+
+    debug!(
+        "listen:{} ip:{} port:{}",
+        args.listen,
+        ip.unwrap(),
+        port.unwrap()
+    );
+    match (args.listen, ip, port) {
+        // 1. -l ip port
+        (true, Some(ip), Some(port)) => {
+            let bind_addr = format!("{}:{}", ip, port)
+                .parse::<SocketAddr>()
+                .expect("unable to parse address");
+            let _ = run_server(bind_addr).await;
         }
-        _ => unreachable!(), // If no subcommand was used it'll match the empty tuple
+        // 2. -l port
+        (true, None, Some(port)) => {
+            let bind_addr = format!("0.0.0.0:{}", port)
+                .parse::<SocketAddr>()
+                .expect("unable to parse address");
+            let _ = run_server(bind_addr).await;
+        }
+        // 3. ip port (no -l)
+        (false, Some(ip), Some(port)) => {
+            let server_addr = format!("{}:{}", ip, port)
+                .parse::<SocketAddr>()
+                .expect("unable to parse address");
+            let _ = run_client(server_addr).await;
+        }
+        _ => {
+            println!("usage: [-l] IP PORT");
+        }
     }
     Ok(())
 }
@@ -65,6 +88,10 @@ async fn accept_conn(endpoint: &Endpoint) -> (SendStream, RecvStream) {
     // accept a single connection
     let incoming_conn = endpoint.accept().await.unwrap();
     let conn = incoming_conn.await.unwrap();
+    debug!(
+        "[server] connection accepted: addr={}",
+        conn.remote_address()
+    );
     let stream = match conn.accept_bi().await {
         Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
             panic!("connection closed");
@@ -96,8 +123,7 @@ async fn recv_data(mut recv: RecvStream) -> Result<(), ()> {
             }
             Err(e) => {
                 // Handle error (e.g., connection error)
-                error!("unexpected error, shutting down {}", e);
-                return Err(());
+                return Err(error!("unexpected error, shutting down {}", e));
             }
         }
     }
